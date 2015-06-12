@@ -1,0 +1,1 @@
+set OPENSSL_CONF=D:\tools\Cluster\OpenSSL-Win64\bin\openssl.cfg
