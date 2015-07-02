@@ -1,0 +1,147 @@
+Apache Tomcat可以说是当下最受欢迎的开源Java Web服务器。如果贵公司的网站预计会随着业务不断发展而迎来更大的访问量，Tomcat的单个实例恐怕无法满足访问量日增的需要。这种情况下，你可能会考虑在“集群”环境下运行Tomcat；在这种环境下，Web服务器的工作负载分配到多个Tomcat实例。
+
+我在本文中将向大家介绍如何配置具有负载均衡和会话复制机制的Tomcat集群。在我们深入探讨配置方面的细节之前，有必要阐明本教程中将出现的几个术语。
+
+术语介绍
+
+负载均衡：前端服务器（常常名为“负载均衡器”、“代理均衡器”或“反向代理”）收到HTTP请求后，前端服务器将请求分发到后端的不止一个“worker”Web服务器，由它们实际处理请求。负载均衡可以消除后端的单一故障点，并且可以为任何Web服务实现高可用性、高扩展性以及更合理的资源优化。
+
+会话复制：会话复制是一种机制，将客户端会话的整个状态原原本本复制到集群中的两个或多个服务器实例，以实现容错和故障切换功能。通常情况下，分发的状态服务能够跨集群中的多个不同服务器实例，复制客户端会话的状态。
+
+集群：集群由两个或多个Web服务器实例组成，这些服务器实例步调一致地工作，透明地处理客户端请求。客户端将一组服务器实例认为是单一实体服务。集群的目的是，为客户端提供高可用性服务，同时尽量高效地利用所有的可用计算资源。
+
+具体要求
+
+下面是搭建Tomcat集群的具体要求。我在本教程中假设有三台Ubuntu服务器。
+
+服务器#1：带mod_jk的Apache HTTP Web服务器（充当代理均衡器）
+服务器#2和服务器#3：Java运行时6.x或更高版本，以及Apache Tomcat 7.x（充当worker Web服务器）。
+Apache Web服务器充当代理均衡器。Apache Web服务器是客户端唯一看得见的那台服务器，所有的Tomcat实例都被隐藏起来，客户端看不见它们。mod_jk插件被激活后，Apache Web服务器将任何入站的HTTP请求转发到集群中的Tomcat worker实例。
+
+在本教程的其余部分，我将描述配置Tomcat集群的逐步过程。
+
+第一步：安装带mod_jk插件的Apache Web服务器
+
+Tomcat Connectors让你可以将Tomcat连接到其他开源Web服务器。对Apache Web服务器而言，Tomcat Connectors以一种名为mod_jk的Apache模块而出现。装有mod_jk的Apache Web服务器可以将Ubuntu服务器变成代理均衡器。想安装Apache Web服务器和mod_jk模块，只要使用下面这个命令。
+
+$ sudo apt-get install apache2 libapache2-mod-jk
+
+第二步：安装JDK和Apache Tomcat
+
+下一步就是将Apache Tomcat安装到另外两台Ubuntu服务器，这两台服务器将作为worker，实际处理HTTP请求。由于Apache Tomcat需要Java开发工具包（JDK），你同样需要安装它。请参阅这篇指南：http://ask.xmodulo.com/install-apache-tomcat-ubuntu-debian.html，即可了解如何将JDK和Apache Tomcat安装到Ubuntu服务器上。
+
+第三步：在代理均衡器上配置Apache mod_jk
+
+在Ubuntu上，mod_jk配置文件位于/etc/apache2/mods-enabled/jk.conf。用下列内容更新该文件：
+
+<IfModule jk_module>   
+   
+    # We need a workers file exactly once   
+    # and in the global server   
+    JkWorkersFile /etc/libapache2-mod-jk/workers.properties   
+   
+    # JK error log   
+    # You can (and should) use rotatelogs here   
+    JkLogFile /var/log/apache2/mod_jk.log   
+   
+    # JK log level (trace,debug,info,warn,error)   
+    JkLogLevel info   
+   
+    JkShmFile /var/log/apache2/jk-runtime-status  
+   
+    JkWatchdogInterval 60   
+   
+    JkMount /*  loadbalancer  
+    JkMount /jk-status jkstatus  
+   
+    # Configure access to jk-status and jk-manager   
+    # If you want to make this available in a virtual host,   
+    # either move this block into the virtual host   
+    # or copy it logically there by including "JkMountCopy On"   
+    # in the virtual host.   
+    # Add an appropriate authentication method here!   
+    <Location /jk-status>   
+            # Inside Location we can omit the URL in JkMount   
+            JkMount jk-status   
+            Order deny,allow   
+            Deny from all   
+            Allow from 127.0.0.1   
+    </Location>   
+    <Location /jk-manager>   
+            # Inside Location we can omit the URL in JkMount   
+            JkMount jk-manager   
+            Order deny,allow   
+            Deny from all   
+            Allow from 127.0.0.1   
+    </Location>   
+</IfModule>  
+为了让上述配置适用于多个Tomcat实例，我们不得不在/etc/libapache2-mod-jk/workers.properties中配置每一个Tomcat worker实例。我们假设，两个worker Ubuntu机器的IP地址分别是192.168.1.100和192.168.1.200。
+
+使用下列内容，创建或编辑etc/libapache2-mod-jk/workers.properties：
+
+worker.list=loadbalancer,jkstatus　# 为192.168.1.100配置Tomcat实例  
+    worker.tomcat1.type=ajp13   
+    worker.tomcat1.host=192.168.1.100   
+    worker.tomcat1.port=8081 
+    # worker“tomcat1”使用多达20个套接字，套接字在连接池中驻留的时间只有短短10分钟。   
+    worker.tomcat1.connection_pool_size=200 
+    worker.tomcat1.connection_pool_timeout=600   
+    # worker“tomcat1”将要求操作系统发送关于连接的KEEP-ALIVE信号。  
+    worker.tomcat1.socket_keepalive=1   
+    # 为192.168.1.200配置Tomcat实例  
+    worker.tomcat2.type=ajp13   
+    worker.tomcat2.host=192.168.1.200   
+    worker.tomcat2.port=8082 
+    # worker“tomcat2”使用多达20个套接字，套接字在连接池中驻留的时间只有短短10分钟。   
+    worker.tomcat2.connection_pool_size=200 
+    worker.tomcat2.connection_pool_timeout=600   
+    # worker“tomcat2”将要求操作系统发送关于连接的KEEP-ALIVE信号。   
+    worker.tomcat2.socket_keepalive=1   
+    worker.jkstatus.type=status  
+    worker.loadbalancer.type=lb   
+    worker.loadbalancer.balance_workers=tomcat1,tomcat2 
+第四步：配置Tomcat实例
+
+使用下列内容，为地址是192.168.1.100的Tomcat实例编辑/opt/apache-tomcat-7.0.30/conf/server.xml：
+
+<Engine name="Catalina" defaultHost="192.168.1.100” jvmRoute="tomcat1"> 
+    <Cluster className="org.apache.catalina.ha.tcp.SimpleTcpCluster" channelSendOptions="8"> 
+    <Manager className="org.apache.catalina.ha.session.DeltaManager" 
+        expireSessionsOnShutdown="false" 
+        notifyListenersOnReplication="true"/> 
+    <Channel className="org.apache.catalina.tribes.group.GroupChannel"> 
+        <Sender className="org.apache.catalina.tribes.transport.ReplicationTransmitter"> 
+            <Transport className="org.apache.catalina.tribes.transport.nio.PooledParallelSender"/> 
+        </Sender> 
+        <Receiver className="org.apache.catalina.tribes.transport.nio.NioReceiver" address="auto"       port="4000" autoBind="100" selectorTimeout="5000" maxThreads="50"/> 
+    <Interceptor className="org.apache.catalina.tribes.group.interceptors.TcpFailureDetector"/> 
+    <Interceptor className="org.apache.catalina.tribes.group.interceptors.MessageDispatch15Interceptor"/> 
+    </Channel> 
+    <Valve className="org.apache.catalina.ha.tcp.ReplicationValve" filter=""/> 
+    <Valve className="org.apache.catalina.ha.session.JvmRouteBinderValve"/> 
+    <ClusterListener className="org.apache.catalina.ha.session.JvmRouteSessionIDBinderListener"/> 
+    <ClusterListener className="org.apache.catalina.ha.session.ClusterSessionListener"/> 
+</Cluster> 
+使用下列内容，为地址是192.168.1.200的Tomcat实例编辑/opt/apache-tomcat-7.0.30/conf/server.xml：  
+    <Engine name="Catalina" defaultHost="192.168.1.200” jvmRoute="tomcat2"> 
+    <Cluster className="org.apache.catalina.ha.tcp.SimpleTcpCluster" channelSendOptions="8"> 
+    <Manager className="org.apache.catalina.ha.session.DeltaManager" 
+        expireSessionsOnShutdown="false" 
+        notifyListenersOnReplication="true"/> 
+    <Channel className="org.apache.catalina.tribes.group.GroupChannel"> 
+        <Sender className="org.apache.catalina.tribes.transport.ReplicationTransmitter"> 
+            <Transport className="org.apache.catalina.tribes.transport.nio.PooledParallelSender"/> 
+        </Sender> 
+      
+        <Receiver className="org.apache.catalina.tribes.transport.nio.NioReceiver" address="auto"       port="4000" autoBind="100" selectorTimeout="5000" maxThreads="30"/> 
+    <Interceptor className="org.apache.catalina.tribes.group.interceptors.TcpFailureDetector"/> 
+    <Interceptor className="org.apache.catalina.tribes.group.interceptors.MessageDispatch15Interceptor"/> 
+    </Channel> 
+    <Valve className="org.apache.catalina.ha.tcp.ReplicationValve" filter=""/> 
+    <Valve className="org.apache.catalina.ha.session.JvmRouteBinderValve"/> 
+    <ClusterListener className="org.apache.catalina.ha.session.JvmRouteSessionIDBinderListener"/> 
+    <ClusterListener className="org.apache.catalina.ha.session.ClusterSessionListener"/> 
+</Cluster> 
+第五步：测试Tomcat集群
+
+Tomcat Connectors有一种特殊类型的worker，那就是所谓的状态worker。状态worker并不将请求转发到Tomcat实例。相反，它允许在运行时获取状态和配置信息，甚至允许动态更改许多配置选项。你可以通过访问该状态worker来监测Tomcat集群：只要使用Web浏览器，进入到http://<proxy-balancer-ip-address>/jk-status，就很容易进行监测了。
